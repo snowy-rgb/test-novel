@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Trickal Scene Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      font-family: sans-serif;
+      background: #111;
+      color: #fff;
+    }
+    #viewer {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100%;
+      text-align: center;
+      padding: 20px;
+    }
+    button {
+      padding: 10px 20px;
+      margin: 10px;
+      font-size: 16px;
+    }
+    #sceneCounter { margin: 0 15px; }
+  </style>
+</head>
+<body>
+  <input type="file" id="fileInput" accept=".tkr" style="position:absolute; top:10px; left:10px; z-index:999;" />
+  <div id="viewer"></div>
+  <div id="controls" style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); display:none;">
+    <button onclick="prevScene()">◀</button>
+    <span id="sceneCounter"></span>
+    <button onclick="nextScene()">▶</button>
+  </div>
+
+  <script>
+    let scenes = [];
+    let currentIndex = 0;
+
+    // ✅ % ~ @ 형식의 메타데이터를 "__meta_키" 로 분리
+    function preprocessTkrToJson(text) {
+        return text.replace(/"(\w+)"\s*:\s*"([^"]*)"\s*%([^@]*)@/g, (match, key, value, meta) => {
+            const cleanMeta = meta
+            .trim()
+            .replace(/\s+/g, ' ')
+            .replace(/"/g, '\\"'); // ← 모든 " 를 \"로 escape
+
+            return `"${key}": "${value}", "__meta_${key}": "${cleanMeta}"`;
+        });
+    }
+
+    
+    function parseMeta(str) {
+      const result = {};
+      const parts = str.split(/[$]/).map(s => s.trim());
+      parts.forEach(seg => {
+        const [key, value] = seg.split('=').map(s => s.trim());
+        if (key && value) result[key] = value;
+      });
+      return result;
+    }
+
+    //posXY
+    function applyPosXY(target, posXYValue) {
+      const match = posXYValue.match(/^(\w+)(<([^>]*)>)?$/);
+      if (!match) return;
+
+      const base = match[1]; // center, left, right, top, below
+      const params = match[3] ? match[3].split(',').map(x => x.trim()) : [];
+
+      // 기본 위치 설정
+      target.style.position = "relative";
+
+      switch (base) {
+        case "center":
+          target.style.display = "flex";
+          target.style.justifyContent = "center";
+          target.style.alignItems = "center";
+          target.style.textAlign = "center";
+          break;
+        case "left":
+          target.style.alignItems = "flex-start";
+          target.style.textAlign = "left";
+          break;
+        case "right":
+          target.style.alignItems = "flex-end";
+          target.style.textAlign = "right";
+          break;
+        case "top":
+          target.style.justifyContent = "flex-start";
+          break;
+        case "below":
+          target.style.justifyContent = "flex-end";
+          break;
+      }
+
+      // 위치 보정값 (px 등 적용)
+      if (params.length === 1 && params[0].includes("px")) {
+        target.style.top = params[0];
+      } else if (params.length === 2) {
+        if (params[0].includes("px")) target.style.left = params[0];
+        if (params[1].includes("px")) target.style.top = params[1];
+      } else if (params.length === 1 && ["top", "center", "below"].includes(params[0])) {
+        // 방향 기반 배치
+        switch (params[0]) {
+          case "top":
+            target.style.justifyContent = "flex-start";
+            break;
+          case "center":
+            target.style.justifyContent = "center";
+            break;
+          case "below":
+            target.style.justifyContent = "flex-end";
+            break;
+        }
+      }
+    }
+
+    //suposXY
+    function applySuposXY(element, value) {
+      const match = value.match(/^(\w+)(<([^>]*)>)?$/);
+      if (!match) return;
+
+      const base = match[1]; // center, left, right, etc
+      const params = match[3] ? match[3].split(',').map(x => x.trim()) : [];
+
+      element.style.position = "absolute";
+
+      // 기본 위치
+      switch (base) {
+        case "center":
+          element.style.left = "50%";
+          element.style.top = "50%";
+          element.style.transform = "translate(-50%, -50%)";
+          break;
+        case "left":
+          element.style.left = "0";
+          break;
+        case "right":
+          element.style.right = "0";
+          break;
+        case "top":
+          element.style.top = "0";
+          break;
+        case "below":
+          element.style.bottom = "0";
+          break;
+      }
+
+      // 좌표 보정값
+      if (params.length === 2) {
+        if (params[0].includes("px")) element.style.left = params[0];
+        if (params[1].includes("px")) element.style.top = params[1];
+      }
+    }
+
+    //normal<>
+    function applyNormalOffset(element, value) {
+      if (!value.startsWith("normal<")) return;
+      const inside = value.slice(7, -1); // remove normal< >
+      const parts = inside.split(',').map(p => p.trim());
+
+      if (parts.length === 1) {
+        const direction = parts[0];
+        switch (direction) {
+          case "top":
+          case "above":
+            element.style.marginTop = "-20px";
+            break;
+          case "left":
+            element.style.marginLeft = "-20px";
+            break;
+          case "right":
+            element.style.marginLeft = "20px";
+            break;
+        }
+      } else if (parts.length === 2) {
+        element.style.marginLeft = parts[0];
+        element.style.marginTop = parts[1];
+      }
+    }
+
+
+    function renderScene(index) {
+        const container = document.getElementById("viewer");
+        const scene = scenes[index];
+        container.innerHTML = "";
+        //posXY
+        const idMeta = scene["__meta_id"] ? parseMeta(scene["__meta_id"]) : {};
+        if (idMeta.posXY) {
+          applyPosXY(container, idMeta.posXY);
+        }
+        //suposXY, normal<>
+        const meta = scene[`__meta_${key}`] ? parseMeta(scene[`__meta_${key}`]) : {};
+        const p = document.createElement("p");
+        p.textContent = value;
+
+        if (meta.suposXY) {
+          applySuposXY(p, meta.suposXY);
+        }
+        if (meta.normal) {
+          applyNormalOffset(p, meta.normal);
+        }
+
+
+
+        // ✅ id 표시 (장면 제목처럼)
+        if (scene["id"]) {
+            const sceneId = document.createElement("div");
+            sceneId.textContent = `#${scene["id"]}`;
+            sceneId.style.fontSize = "16px";
+            sceneId.style.color = "#888";
+            sceneId.style.marginBottom = "10px";
+            container.appendChild(sceneId);
+        }
+
+        for (const key in scene) {
+            if (key.startsWith("__meta_") || key === "id") continue; // ✅ id는 따로, meta는 무시
+
+            const value = scene[key];
+            const meta = scene[`__meta_${key}`] ? parseMeta(scene[`__meta_${key}`]) : {};
+
+            const p = document.createElement("p");
+            p.textContent = value; // ✅ 키명 없이 순수 내용만 출력
+
+            // 🎨 메타데이터 스타일 적용
+            if (meta.arti) {
+            if (meta.arti === "think") {
+                p.style.opacity = "0.6";
+                p.style.fontStyle = "italic";
+                p.style.color = "#ccc";
+            } else if (meta.arti.startsWith("::")) {
+                const character = meta.arti.replace(/::/g, "").trim();
+                if (character === "에르핀") {
+                p.style.color = "violet";
+                p.style.fontWeight = "bold";
+                } else {
+                p.style.color = "skyblue";
+                p.style.fontWeight = "bold";
+                }
+            }
+            }
+
+            container.appendChild(p);
+        }
+
+        document.getElementById("sceneCounter").textContent = `(${index + 1}/${scenes.length})`;
+    }
+
+
+    function prevScene() {
+      if (currentIndex > 0) {
+        currentIndex--;
+        renderScene(currentIndex);
+      }
+    }
+
+    function nextScene() {
+      if (currentIndex < scenes.length - 1) {
+        currentIndex++;
+        renderScene(currentIndex);
+      }
+    }
+
+    document.getElementById("fileInput").addEventListener("change", function (e) {
+        const file = e.target.files[0];
+        if (!file) return; // 파일이 없으면 그냥 종료
+
+        const reader = new FileReader();
+
+        reader.onload = function (event) {
+            const rawText = event.target.result;
+
+            // 🔥 메타데이터 변환
+            const jsonCompatible = preprocessTkrToJson(rawText)
+            .replace(/,\s*}/g, '}')
+            .replace(/,\s*]/g, ']');
+
+            console.log("🔍 변환된 JSON 문자열:", jsonCompatible);
+
+            try {
+                const data = JSON.parse(jsonCompatible);
+                scenes = data.main;
+                currentIndex = 0;
+                renderScene(currentIndex);
+                document.getElementById("controls").style.display = "block";
+                } catch (err) {
+                alert("파일을 파싱할 수 없습니다:\n" + err.message);
+            }
+        };
+
+        // 💡 이 줄이 오류났다면 `file`이 undefined였던 것!
+        reader.readAsText(file);
+    });
+
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowLeft") prevScene();
+      else if (e.key === "ArrowRight") nextScene();
+    });
+  </script>
+</body>
+</html>
